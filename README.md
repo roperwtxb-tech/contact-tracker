@@ -22,6 +22,7 @@ still wants visibility into.
   the full timeline across. Falls back to a flag + one-tap copy if you'd rather paste it yourself.
 - **Works in the field** — installs as a PWA, opens instantly from cache, and queues writes made offline,
   flushing them the moment signal comes back.
+- **One login** — the same username and password as MyCRM unlocks the app and authorises the CRM write.
 
 ## Files
 
@@ -48,24 +49,31 @@ can never duplicate anything.
 
 ### Access
 
-`ct_people` and `ct_timeline` allow the `anon` role full access — the app has no login gate, per the build
-brief. `crm_data` is untouched and stays scoped to `auth.uid()`, so the publishable key in this repo grants
-access to the tracker only, never to the CRM. Anyone with the URL can read and write the tracker.
+The app is gated behind the **same login as MyCRM** — one Supabase account unlocks the tracker and
+authorises the CRM write, so there's no second password to remember and no shared passcode to leak.
+`ct_people` and `ct_timeline` are `authenticated`-only, so the publishable key in this repo is useless
+on its own: without a signed-in session it reads and writes nothing. `crm_data` is untouched and stays
+scoped to `auth.uid()`.
 
-To add a passcode later, gate `render()` at the bottom of `index.html` behind a prompt — or better, reuse
-the MyCRM sign-in that promotion already uses, which gives real per-user auth rather than a shared word.
+Sessions persist per device and refresh silently. Offline, an expired token is kept rather than forcing a
+sign-out, so field edits keep queueing; the outbox replays once signal returns. Signing out clears the
+local cache of contacts, and warns first if anything is still unsynced.
 
 ### Promote to MyCRM
 
-Promotion writes into `crm_data.data.contacts` for the signed-in agent, which is protected by
-`auth.uid() = agent_id`. So the first promote on a device asks for MyCRM credentials (username without the
-`@xo-crm.local` suffix is fine); the session is stored locally and reused after that.
+Promotion writes into `crm_data.data.contacts` for the signed-in agent. Because the app already holds that
+session, it's one tap — no extra prompt.
 
 The contact is written with the exact field set MyCRM already uses — no new or missing keys — with
-`stage: "Prospect"`, `tags: "Referral: <source>"`, and the source plus full timeline under `custom`.
-The `notes` array is deliberately left empty because MyCRM's expected shape for it can't be inferred from
-existing data; the promote sheet's **Copy** button hands you the formatted timeline for pasting wherever
-MyCRM displays notes. Point `crmContactFrom()` at the right field once that's known.
+`stage: "Prospect"` and `tags: "Referral: <source>"`.
+
+The timeline placement is self-correcting. Every existing MyCRM contact has an empty `notes` array, so its
+item shape can't be read from the data, and guessing wrong could break the CRM's own rendering. So
+`notesFor()` looks for the first real note anywhere in MyCRM and mirrors its shape — string entries stay
+strings; object entries copy the same keys, with the text and date slotted into whichever keys hold them.
+Until such a note exists, the timeline goes into `custom` and the promote sheet's **Copy** button hands you
+a formatted version. Add one note by hand in MyCRM and promotion starts writing proper notes with no code
+change.
 
 The tracker record is never deleted by promoting — it stays as the full history and is marked `IN CRM`.
 

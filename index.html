@@ -258,6 +258,29 @@ pre.copyblock{
   font-weight:600;box-shadow:var(--shadow-lg);max-width:88vw;text-align:center
 }
 .toast.err{background:#dc2626;color:#fff}
+
+/* ---------- sign-in gate ---------- */
+.acct{
+  flex:none;width:31px;height:31px;border-radius:50%;background:var(--accent-soft);color:var(--accent);
+  font-size:11.5px;font-weight:800;letter-spacing:.3px;display:grid;place-items:center;
+  border:1px solid var(--line)
+}
+#gate{
+  position:fixed;inset:0;z-index:500;background:var(--bg);display:flex;align-items:center;justify-content:center;
+  padding:24px calc(20px + env(safe-area-inset-left,0px)) calc(24px + var(--safe-b))
+}
+.gcard{width:100%;max-width:370px}
+.glogo{width:54px;height:54px;border-radius:14px;margin:0 auto 18px;display:block}
+.gcard h1{font-size:22px;font-weight:730;letter-spacing:-.4px;margin:0 0 6px;text-align:center}
+.gcard p{margin:0 0 22px;color:var(--ink-3);font-size:14px;line-height:1.55;text-align:center}
+.gcard label{display:block;font-size:12px;font-weight:750;color:var(--ink-3);margin:0 0 5px;
+  text-transform:uppercase;letter-spacing:.5px}
+.gcard input{
+  width:100%;padding:11px 13px;border:1px solid var(--line);border-radius:10px;background:var(--panel);
+  outline:none;font-size:16px;margin-bottom:14px
+}
+.gcard input:focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft)}
+.gerr{color:#dc2626;font-size:13.5px;line-height:1.5;min-height:20px;margin-bottom:6px}
 </style>
 </head>
 <body>
@@ -267,6 +290,7 @@ pre.copyblock{
       <div class="hrow">
         <div class="title">Contacts &amp; Referrals</div>
         <div class="sync" id="sync"><span class="dot" id="syncDot"></span><span id="syncTxt">…</span></div>
+        <button class="acct" id="acctBtn" aria-label="Account"></button>
         <button class="btn-add" id="addBtn">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
           Add
@@ -378,21 +402,74 @@ const state = {
 let outbox = LS.get('ct_outbox', []);
 const saveCache = () => { LS.set('ct_people', state.people); LS.set('ct_entries', state.entries); };
 
+/* ---------- auth ----------
+   Same credentials as MyCRM: one Supabase account, used both to unlock this app
+   and to write into the CRM when promoting. No separate password to remember. */
+const AUTH = {
+  key: 'ct_session',
+  get(){ return LS.get(this.key, null); },
+  set(s){ LS.set(this.key, s); },
+  clear(){ try{ localStorage.removeItem(this.key); }catch(e){} },
+  user(){ return (this.get()?.email || '').replace('@xo-crm.local', ''); },
+
+  shape(j, prev){
+    return { access_token:j.access_token, refresh_token:j.refresh_token,
+      expires_at: Date.now() + (j.expires_in || 3600) * 1000,
+      user_id: j.user?.id || prev?.user_id, email: j.user?.email || prev?.email };
+  },
+  async login(username, password){
+    const email = username.includes('@') ? username : username + '@xo-crm.local';
+    const res = await fetch(SUPA_URL + '/auth/v1/token?grant_type=password', {
+      method:'POST', headers:{ apikey:SUPA_KEY, 'Content-Type':'application/json' },
+      body: JSON.stringify({ email, password })
+    });
+    const j = await res.json();
+    if(!res.ok) throw new Error(j.error_description || j.msg || j.message || 'Sign-in failed');
+    this.set(this.shape(j));
+    return this.get();
+  },
+  /* Returns a usable access token, refreshing when it's close to expiry.
+     Offline, it hands back the existing token rather than signing you out —
+     requests will fail and retry from the outbox once signal returns. */
+  async token(){
+    const s = this.get();
+    if(!s) throw Object.assign(new Error('NOAUTH'), { noauth:true });
+    if(Date.now() < s.expires_at - 120000) return s.access_token;
+    if(!navigator.onLine) return s.access_token;
+    const res = await fetch(SUPA_URL + '/auth/v1/token?grant_type=refresh_token', {
+      method:'POST', headers:{ apikey:SUPA_KEY, 'Content-Type':'application/json' },
+      body: JSON.stringify({ refresh_token: s.refresh_token })
+    });
+    if(!res.ok){
+      if(res.status >= 400 && res.status < 500){ this.clear(); signedOut(); }
+      throw Object.assign(new Error('NOAUTH'), { noauth:true });
+    }
+    this.set(this.shape(await res.json(), s));
+    return this.get().access_token;
+  }
+};
+
 /* ---------- network ---------- */
-async function rest(path, opts = {}){
+async function rest(path, opts = {}, retried){
+  const token = await AUTH.token();
   const res = await fetch(SUPA_URL + '/rest/v1/' + path, {
     ...opts,
     headers: {
       apikey: SUPA_KEY,
-      Authorization: 'Bearer ' + SUPA_KEY,
+      Authorization: 'Bearer ' + token,
       'Content-Type': 'application/json',
       ...(opts.headers || {})
     }
   });
+  if(res.status === 401 && !retried){
+    const s = AUTH.get();
+    if(s){ AUTH.set({ ...s, expires_at: 0 }); return rest(path, opts, true); }
+  }
   if(!res.ok){
     const body = await res.text().catch(()=> '');
     const err = new Error('HTTP ' + res.status + ' ' + body.slice(0,300));
     err.status = res.status;
+    if(res.status === 401 || res.status === 403){ err.noauth = true; AUTH.clear(); signedOut(); }
     throw err;
   }
   return res.status === 204 ? null : res.json().catch(()=>null);
@@ -422,7 +499,9 @@ async function flush(){
       }
       outbox.shift(); LS.set('ct_outbox', outbox);
     }catch(err){
-      if(err.status && err.status >= 400 && err.status < 500){
+      if(err.noauth){
+        break; // signed out mid-flush — keep the work, replay it after signing back in
+      } else if(err.status && err.status >= 400 && err.status < 500){
         // Permanent failure — drop it so the queue can't wedge forever.
         console.error('Dropping bad op', op, err);
         outbox.shift(); LS.set('ct_outbox', outbox);
@@ -814,46 +893,53 @@ function personSheet(existing){
 }
 
 /* ---------- promote to MyCRM ---------- */
-const CRM = {
-  key: 'ct_crm_session',
-  get(){ return LS.get(this.key, null); },
-  set(v){ LS.set(this.key, v); },
-  clear(){ try{ localStorage.removeItem(this.key); }catch(e){} },
-  async login(username, password){
-    const email = username.includes('@') ? username : username + '@xo-crm.local';
-    const res = await fetch(SUPA_URL + '/auth/v1/token?grant_type=password', {
-      method:'POST', headers:{ apikey:SUPA_KEY, 'Content-Type':'application/json' },
-      body: JSON.stringify({ email, password })
-    });
-    const j = await res.json();
-    if(!res.ok) throw new Error(j.error_description || j.msg || j.message || 'Sign-in failed');
-    const sess = { access_token:j.access_token, refresh_token:j.refresh_token,
-      expires_at: Date.now() + (j.expires_in||3600)*1000, user_id:j.user?.id, email:j.user?.email };
-    this.set(sess); return sess;
-  },
-  async token(){
-    let s = this.get();
-    if(!s) throw new Error('NOAUTH');
-    if(Date.now() < s.expires_at - 60000) return s;
-    const res = await fetch(SUPA_URL + '/auth/v1/token?grant_type=refresh_token', {
-      method:'POST', headers:{ apikey:SUPA_KEY, 'Content-Type':'application/json' },
-      body: JSON.stringify({ refresh_token: s.refresh_token })
-    });
-    const j = await res.json();
-    if(!res.ok){ this.clear(); throw new Error('NOAUTH'); }
-    s = { access_token:j.access_token, refresh_token:j.refresh_token,
-      expires_at: Date.now() + (j.expires_in||3600)*1000, user_id:j.user?.id || s.user_id, email:j.user?.email || s.email };
-    this.set(s); return s;
-  }
-};
-
 const crmId = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 10);
 
 function timelineText(p){
   const rows = entriesFor(p.id).slice().reverse();
   return rows.map(e => `${fmtDate(e.entry_date)} — ${e.body}`).join('\n');
 }
-function crmContactFrom(p){
+/* MyCRM's contacts all carry an empty `notes` array, so its item shape can't be read
+   from the data. Rather than guess and risk breaking the CRM's own rendering, mirror
+   the shape of the first real note found there — the moment one exists, promotion
+   starts writing proper notes with no code change. Until then, fall back to `custom`. */
+function noteSample(contacts){
+  for(const c of contacts || []){
+    if(Array.isArray(c?.notes) && c.notes.length) return c.notes[0];
+  }
+  return null;
+}
+function notesFor(p, contacts){
+  const sample = noteSample(contacts);
+  if(sample == null) return null;
+  const rows = entriesFor(p.id).slice().reverse();          // oldest first
+  if(typeof sample === 'string') return rows.map(e => `${fmtDate(e.entry_date)} — ${e.body}`);
+  if(typeof sample !== 'object') return null;
+
+  const keys = Object.keys(sample);
+  const textKey = keys.find(k => /^(body|text|note|content|message|entry)$/i.test(k))
+               || keys.find(k => typeof sample[k] === 'string' && sample[k].length > 12);
+  if(!textKey) return null;
+  const dateKey = keys.find(k => /(date|created|time|stamp|_at)$/i.test(k));
+  const idKey   = keys.find(k => /^id$/i.test(k));
+
+  return rows.map(e => {
+    const o = {};
+    for(const k of keys){
+      const v = sample[k];
+      o[k] = Array.isArray(v) ? [] : (v && typeof v === 'object' ? {} : (typeof v === 'number' ? 0 : ''));
+    }
+    if(idKey) o[idKey] = crmId();
+    if(dateKey) o[dateKey] = typeof sample[dateKey] === 'number'
+      ? new Date(e.entry_date + 'T12:00:00').getTime()
+      : e.entry_date;
+    o[textKey] = e.body;
+    return o;
+  });
+}
+
+function crmContactFrom(p, existing){
+  const notes = notesFor(p, existing);
   return {
     id: crmId(),
     name: p.name,
@@ -864,11 +950,10 @@ function crmContactFrom(p){
     district: p.company || '',
     vertical: '',
     tags: p.source ? `Referral: ${p.source}` : 'Referral',
-    notes: [],
-    custom: {
-      'Referral source': p.source || '',
-      'Referral timeline': timelineText(p) || '(no entries)'
-    },
+    notes: notes || [],
+    custom: notes
+      ? { 'Referral source': p.source || '' }
+      : { 'Referral source': p.source || '', 'Referral timeline': timelineText(p) || '(no entries)' },
     created: Date.now(),
     birthday:'', spouseName:'', spouseBirthday:'', clientSince:'',
     children: [], interests: [], policies: []
@@ -876,43 +961,33 @@ function crmContactFrom(p){
 }
 
 async function crmPush(p){
-  const s = await CRM.token();
-  const rows = await fetch(SUPA_URL + `/rest/v1/crm_data?agent_id=eq.${s.user_id}&select=data`, {
-    headers:{ apikey:SUPA_KEY, Authorization:'Bearer ' + s.access_token }
-  }).then(r => r.json());
+  const uid = AUTH.get()?.user_id;
+  if(!uid) throw Object.assign(new Error('NOAUTH'), { noauth:true });
+  const rows = await rest(`crm_data?agent_id=eq.${uid}&select=data`);
   if(!Array.isArray(rows) || !rows.length) throw new Error('No MyCRM record found for this login.');
   const data = rows[0].data || {};
   const contacts = Array.isArray(data.contacts) ? data.contacts : [];
-  const c = crmContactFrom(p);
+  const c = crmContactFrom(p, contacts);
   contacts.push(c);
   data.contacts = contacts;
-  const res = await fetch(SUPA_URL + `/rest/v1/crm_data?agent_id=eq.${s.user_id}`, {
-    method:'PATCH',
-    headers:{ apikey:SUPA_KEY, Authorization:'Bearer ' + s.access_token,
-      'Content-Type':'application/json', Prefer:'return=minimal' },
+  await rest(`crm_data?agent_id=eq.${uid}`, {
+    method:'PATCH', headers:{ Prefer:'return=minimal' },
     body: JSON.stringify({ data, updated_at: new Date().toISOString() })
   });
-  if(!res.ok) throw new Error('Write failed: ' + res.status + ' ' + await res.text());
   return c;
 }
 
 function promoteSheet(p){
-  const sess = CRM.get();
   const preview = `${p.name}\n${p.source ? 'Source: ' + p.source + '\n' : ''}${p.phone ? 'Phone: ' + p.phone + '\n' : ''}${p.email ? 'Email: ' + p.email + '\n' : ''}${p.company ? 'Company: ' + p.company + '\n' : ''}\n${timelineText(p) || '(no timeline entries)'}`;
   const sc = sheet(`
     <h2>Promote to MyCRM</h2>
-    <div class="note">Adds ${esc(p.name)} to MyCRM as a <b>Prospect</b>, with the source and the full timeline carried over. This record stays here either way.</div>
-    ${sess
-      ? `<div class="note" style="margin-bottom:12px">Signed in to MyCRM as <b>${esc((sess.email||'').replace('@xo-crm.local',''))}</b>.
-           <button id="mOut" style="color:var(--accent);font-weight:700">Switch account</button></div>`
-      : `<div class="field"><label>MyCRM username</label><input id="cU" placeholder="sroper" autocomplete="username"></div>
-         <div class="field"><label>MyCRM password</label><input id="cP" type="password" autocomplete="current-password"></div>
-         <div class="note">Signed in once per device, then stored locally so future promotes are one tap.</div>`}
+    <div class="note">Adds ${esc(p.name)} to MyCRM as a <b>Prospect</b>, with the source and the full timeline carried over. This record stays here either way, as the full history.</div>
+    <div class="note" style="margin-bottom:12px">Writing to MyCRM as <b>${esc(AUTH.user())}</b>.</div>
     <h3 style="font-size:11px;font-weight:800;letter-spacing:.9px;text-transform:uppercase;color:var(--ink-3);margin:14px 0 7px">What gets sent</h3>
     <pre class="copyblock" id="cPre">${esc(preview)}</pre>
     <div class="actions">
       <button class="btn ghost" id="cCopy">Copy</button>
-      <button class="btn" id="cGo">${sess ? 'Send to MyCRM' : 'Sign in &amp; send'}</button>
+      <button class="btn" id="cGo">Send to MyCRM</button>
     </div>
     <div style="height:8px"></div>
     <button class="btn ghost wide" id="cFlag">Just flag as “ready for CRM”</button>`);
@@ -926,9 +1001,6 @@ function promoteSheet(p){
       toast('Selected — press copy');
     }
   };
-  const out = sc.querySelector('#mOut');
-  if(out) out.onclick = () => { CRM.clear(); sc.remove(); promoteSheet(p); };
-
   sc.querySelector('#cFlag').onclick = () => {
     addEntry(p.id, 'Flagged as ready for MyCRM', todayISO(), 'status');
     patchPerson(p.id, { status:'client' });
@@ -938,12 +1010,6 @@ function promoteSheet(p){
   sc.querySelector('#cGo').onclick = async ev => {
     const btn = ev.currentTarget; btn.disabled = true; btn.textContent = 'Working…';
     try{
-      if(!CRM.get()){
-        const u = sc.querySelector('#cU').value.trim();
-        const pw = sc.querySelector('#cP').value;
-        if(!u || !pw) throw new Error('Enter your MyCRM username and password.');
-        await CRM.login(u, pw);
-      }
       const c = await crmPush(p);
       const now = new Date().toISOString();
       Object.assign(p, { promoted:true, promoted_at:now, crm_contact_id:c.id, status:'client', updated_at:now });
@@ -952,16 +1018,107 @@ function promoteSheet(p){
       sc.remove(); render(); toast('Added to MyCRM');
     }catch(err){
       console.error(err);
-      btn.disabled = false; btn.textContent = CRM.get() ? 'Send to MyCRM' : 'Sign in & send';
-      toast(err.message === 'NOAUTH' ? 'Please sign in to MyCRM again' : (err.message || 'Could not reach MyCRM'), true);
-      if(err.message === 'NOAUTH'){ sc.remove(); promoteSheet(p); }
+      btn.disabled = false; btn.textContent = 'Send to MyCRM';
+      if(err.noauth){ sc.remove(); return; }   // the sign-in screen is already up
+      toast(err.message || 'Could not reach MyCRM', true);
     }
+  };
+}
+
+/* ---------- sign-in gate ---------- */
+const initials = u => (u || '?').replace(/[^a-z]/gi, '').slice(0, 2).toUpperCase() || '?';
+
+function signedOut(msg){
+  showGate(msg || 'Your session expired. Sign in again to continue.');
+}
+
+function showGate(msg){
+  const existing = document.getElementById('gate');
+  if(existing){ if(msg) existing.querySelector('#gErr').textContent = msg; return; }
+  document.querySelectorAll('.scrim').forEach(s => s.remove());
+  const g = document.createElement('div');
+  g.id = 'gate';
+  g.innerHTML = `
+    <form class="gcard" id="gForm" autocomplete="on">
+      <svg class="glogo" viewBox="0 0 512 512" aria-hidden="true">
+        <defs><linearGradient id="gl" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0" stop-color="#0f172a"/><stop offset="1" stop-color="#1e40af"/></linearGradient></defs>
+        <rect width="512" height="512" rx="113" fill="url(#gl)"/>
+        <circle cx="133" cy="157" r="40" fill="#14b8a6"/><rect x="197" y="140" width="186" height="35" rx="17" fill="#fff"/>
+        <circle cx="133" cy="256" r="40" fill="#ec4899"/><rect x="197" y="239" width="145" height="35" rx="17" fill="#fff"/>
+        <circle cx="133" cy="355" r="40" fill="#6366f1"/><rect x="197" y="338" width="167" height="35" rx="17" fill="#fff"/>
+      </svg>
+      <h1>Contacts &amp; Referrals</h1>
+      <p>Sign in with the same username and password you use for MyCRM.</p>
+      <label for="gU">Username</label>
+      <input id="gU" autocomplete="username" autocapitalize="none" autocorrect="off" spellcheck="false" placeholder="sroper">
+      <label for="gP">Password</label>
+      <input id="gP" type="password" autocomplete="current-password">
+      <div class="gerr" id="gErr">${esc(msg || '')}</div>
+      <button class="btn wide" id="gGo" type="submit">Sign in</button>
+    </form>`;
+  document.body.appendChild(g);
+  setTimeout(() => g.querySelector(AUTH.get() ? '#gP' : '#gU').focus(), 80);
+
+  g.querySelector('#gForm').onsubmit = async ev => {
+    ev.preventDefault();
+    const btn = g.querySelector('#gGo'), err = g.querySelector('#gErr');
+    const u = g.querySelector('#gU').value.trim(), pw = g.querySelector('#gP').value;
+    if(!u || !pw){ err.textContent = 'Enter your username and password.'; return; }
+    btn.disabled = true; btn.textContent = 'Signing in…'; err.textContent = '';
+    try{
+      await AUTH.login(u, pw);
+      g.remove();
+      startApp();
+    }catch(e){
+      btn.disabled = false; btn.textContent = 'Sign in';
+      err.textContent = /invalid|credential|grant/i.test(e.message)
+        ? 'That username or password did not work.'
+        : (navigator.onLine ? e.message : 'You appear to be offline.');
+    }
+  };
+}
+
+function acctSheet(){
+  const pending = outbox.length;
+  const sc = sheet(`
+    <h2>Account</h2>
+    <div class="note">Signed in as <b>${esc(AUTH.user())}</b> — the same login as MyCRM. Promoting someone writes to that account's CRM.</div>
+    ${pending ? `<div class="note" style="color:#b45309"><b>${pending} change${pending > 1 ? 's have' : ' has'} not synced yet.</b>
+        Signing out now would discard ${pending > 1 ? 'them' : 'it'}. Reconnect first if you can.</div>` : ''}
+    <div class="actions">
+      <button class="btn ghost" id="aClose">Close</button>
+      <button class="btn danger" id="aOut">Sign out</button>
+    </div>`);
+  sc.querySelector('#aClose').onclick = () => sc.remove();
+  sc.querySelector('#aOut').onclick = () => {
+    if(pending && !confirm(`${pending} unsynced change${pending > 1 ? 's' : ''} will be lost. Sign out anyway?`)) return;
+    AUTH.clear();
+    outbox = []; LS.set('ct_outbox', outbox);
+    state.people = []; state.entries = []; state.openId = null; state.lastOk = 0;
+    saveCache(); LS.set('ct_lastok', 0);
+    sc.remove();
+    render();
+    showGate('');
   };
 }
 
 /* ---------- boot ---------- */
 function render(){ renderTabs(); renderChips(); renderList(); renderDetail(); paintSync(); }
 
+let polling = false;
+function startApp(){
+  $('#acctBtn').textContent = initials(AUTH.user());
+  render();
+  flush();
+  pull();
+  if(!polling){
+    polling = true;
+    setInterval(() => { if(document.visibilityState === 'visible' && AUTH.get()){ flush(); pull(); } }, POLL_MS);
+  }
+}
+
+$('#acctBtn').onclick = acctSheet;
 $('#addBtn').onclick = () => personSheet(null);
 const qEl = $('#q');
 qEl.addEventListener('input', () => {
@@ -971,17 +1128,16 @@ qEl.addEventListener('input', () => {
 });
 $('#qClr').onclick = () => { qEl.value = ''; state.q = ''; $('#qClr').classList.add('hide'); renderList(); qEl.focus(); };
 
-addEventListener('online',  () => { paintSync(); flush(); pull(); });
+addEventListener('online',  () => { paintSync(); if(AUTH.get()){ flush(); pull(); } });
 addEventListener('offline', paintSync);
 addEventListener('keydown', ev => { if(ev.key === 'Escape' && innerWidth < 960 && state.openId) closePerson(); });
-document.addEventListener('visibilitychange', () => { if(document.visibilityState === 'visible'){ flush(); pull(); } });
+document.addEventListener('visibilitychange', () => {
+  if(document.visibilityState === 'visible' && AUTH.get()){ flush(); pull(); }
+});
 matchMedia('(prefers-color-scheme: dark)').addEventListener?.('change', render);
 addEventListener('resize', () => { if(innerWidth >= 960) $('#detail').classList.remove('open'); });
 
-render();
-flush();
-pull();
-setInterval(() => { if(document.visibilityState === 'visible'){ flush(); pull(); } }, POLL_MS);
+if(AUTH.get()) startApp(); else { render(); showGate(''); }
 
 if('serviceWorker' in navigator){
   addEventListener('load', () => navigator.serviceWorker.register('sw.js').catch(e => console.warn('SW', e)));

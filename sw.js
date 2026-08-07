@@ -1,7 +1,7 @@
 /* Contacts & Referrals — app-shell service worker.
    Shell is cache-first (instant launch, works offline);
    Supabase calls always go to the network and are never cached. */
-const CACHE = 'ct-shell-v3';
+const CACHE = 'ct-shell-v4';
 const SHELL = [
   './',
   './index.html',
