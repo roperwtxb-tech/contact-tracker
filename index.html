@@ -899,10 +899,12 @@ function timelineText(p){
   const rows = entriesFor(p.id).slice().reverse();
   return rows.map(e => `${fmtDate(e.entry_date)} — ${e.body}`).join('\n');
 }
-/* MyCRM's contacts all carry an empty `notes` array, so its item shape can't be read
-   from the data. Rather than guess and risk breaking the CRM's own rendering, mirror
-   the shape of the first real note found there — the moment one exists, promotion
-   starts writing proper notes with no code change. Until then, fall back to `custom`. */
+/* MyCRM stores contact notes as { date: 'YYYY-MM-DD', text: '…' } — confirmed against a
+   real note in the live CRM. That's the default below. The mirroring stays as a safety
+   net: if MyCRM's note format ever changes, promotion copies the shape of the first real
+   note it finds rather than writing something the CRM can't render. */
+const DEFAULT_NOTE = { date: '', text: '' };
+
 function noteSample(contacts){
   for(const c of contacts || []){
     if(Array.isArray(c?.notes) && c.notes.length) return c.notes[0];
@@ -910,8 +912,7 @@ function noteSample(contacts){
   return null;
 }
 function notesFor(p, contacts){
-  const sample = noteSample(contacts);
-  if(sample == null) return null;
+  const sample = noteSample(contacts) ?? DEFAULT_NOTE;
   const rows = entriesFor(p.id).slice().reverse();          // oldest first
   if(typeof sample === 'string') return rows.map(e => `${fmtDate(e.entry_date)} — ${e.body}`);
   if(typeof sample !== 'object') return null;

@@ -67,13 +67,14 @@ session, it's one tap — no extra prompt.
 The contact is written with the exact field set MyCRM already uses — no new or missing keys — with
 `stage: "Prospect"` and `tags: "Referral: <source>"`.
 
-The timeline placement is self-correcting. Every existing MyCRM contact has an empty `notes` array, so its
-item shape can't be read from the data, and guessing wrong could break the CRM's own rendering. So
-`notesFor()` looks for the first real note anywhere in MyCRM and mirrors its shape — string entries stay
-strings; object entries copy the same keys, with the text and date slotted into whichever keys hold them.
-Until such a note exists, the timeline goes into `custom` and the promote sheet's **Copy** button hands you
-a formatted version. Add one note by hand in MyCRM and promotion starts writing proper notes with no code
-change.
+The timeline lands in the contact's `notes`, one note per dated entry, each keeping its own entry date
+rather than the promotion date. MyCRM's format — `{ date: 'YYYY-MM-DD', text: '…' }` — was confirmed
+against a real note in the live CRM and is the default in `DEFAULT_NOTE`.
+
+`notesFor()` keeps a safety net around that default: if MyCRM's note format ever changes, it copies the
+shape of the first real note it finds instead of writing something the CRM can't render — string entries
+stay strings; object entries reuse the same keys, with the text and date slotted into whichever keys hold
+them. So a format change degrades to "still correct" rather than "breaks the CRM".
 
 The tracker record is never deleted by promoting — it stays as the full history and is marked `IN CRM`.
 
