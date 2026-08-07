@@ -317,6 +317,7 @@ pre.copyblock{
 const SUPA_URL = 'https://uknwddmqebveovxxxyrd.supabase.co';
 const SUPA_KEY = 'sb_publishable_UXwMNU3nO4vLGW5zre09Qw_OzWTCcj4';
 const POLL_MS  = 8000;
+const BUILD    = '2026-08-07.7';   // shown under Account, so which build a device is running is never a guess
 
 const STATUSES = [
   { k:'they_handling', label:"They're handling it", hint:'Randy/Dewaine own the follow-up', fg:'#92400e', bg:'#fef3c7', sq:'#f59e0b', dfg:'#fbbf24', dbg:'#3a2c08' },
@@ -1129,8 +1130,18 @@ function acctSheet(){
     <div class="actions">
       <button class="btn ghost" id="aClose">Close</button>
       <button class="btn danger" id="aOut">Sign out</button>
-    </div>`);
+    </div>
+    <div style="height:10px"></div>
+    <div class="note" style="text-align:center;margin:0">Version ${esc(BUILD)} on this device —
+      <button id="aRefresh" style="color:var(--accent);font-weight:700">check for update</button></div>`);
   sc.querySelector('#aClose').onclick = () => sc.remove();
+  sc.querySelector('#aRefresh').onclick = async () => {
+    try{
+      const regs = await navigator.serviceWorker.getRegistrations();
+      await Promise.all(regs.map(r => r.update()));
+    }catch(e){}
+    location.reload();
+  };
   sc.querySelector('#aOut').onclick = () => {
     if(pending && !confirm(`${pending} unsynced change${pending > 1 ? 's' : ''} will be lost. Sign out anyway?`)) return;
     AUTH.clear();
