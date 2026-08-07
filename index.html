@@ -666,12 +666,37 @@ function closePerson(){
   renderList();
 }
 
+/* The background sync re-renders every few seconds. Rebuilding the detail pane while
+   you're mid-sentence would wipe the composer, so: skip the rebuild entirely when
+   nothing about this person actually changed, and when it does change, carry any
+   half-typed entry (and the caret) across the rebuild. */
+let lastDetailSig = null;
+const detailSig = (p, rows) => JSON.stringify([
+  p.id, p.name, p.source, p.status, p.phone, p.email, p.company, p.promoted,
+  rows.map(e => [e.id, e.entry_date, e.body, e.kind])
+]);
+
 function renderDetail(){
   const el = $('#detail');
   const p = state.people.find(x => x.id === state.openId);
-  if(!p){ el.innerHTML = `<div class="empty" style="padding-top:120px">Select someone to see their full history.</div>`; return; }
+  if(!p){
+    if(lastDetailSig !== '__none__'){
+      el.innerHTML = `<div class="empty" style="padding-top:120px">Select someone to see their full history.</div>`;
+      lastDetailSig = '__none__';
+    }
+    return;
+  }
   const sc = srcColor(p.source), st = statColor(p.status), s = S[p.status] || S.they_handling;
   const rows = entriesFor(p.id);
+
+  const sig = detailSig(p, rows);
+  if(sig === lastDetailSig) return;          // nothing changed — leave the DOM, and anything half-typed, alone
+  lastDetailSig = sig;
+
+  const draft = { body: el.querySelector('#nb')?.value || '', date: el.querySelector('#nd')?.value || '' };
+  const act = document.activeElement;
+  const focused = (act && act.id && el.contains(act))
+    ? { id: act.id, value: act.value, start: act.selectionStart, end: act.selectionEnd } : null;
 
   el.innerHTML = `
   <div class="dhead">
@@ -774,8 +799,9 @@ function renderDetail(){
   nb.addEventListener('keydown', ev => { if((ev.metaKey||ev.ctrlKey) && ev.key === 'Enter') nAdd.click(); });
   nAdd.onclick = () => {
     const body = nb.value.trim(); if(!body) return;
-    addEntry(p.id, body, $('#nd').value || todayISO());
-    nb.value = ''; grow();
+    const date = $('#nd').value || todayISO();
+    nb.value = ''; grow();                   // clear before the re-render, so the draft isn't carried back in
+    addEntry(p.id, body, date);
   };
 
   ['fSrc:source','fPhone:phone','fEmail:email','fCo:company'].forEach(pair => {
@@ -783,6 +809,19 @@ function renderDetail(){
     const input = el.querySelector('#' + id);
     input.onchange = () => patchPerson(p.id, { [key]: input.value.trim() });
   });
+
+  // put back whatever was being typed when the sync interrupted
+  if(draft.body){ nb.value = draft.body; grow(); }
+  if(draft.date) $('#nd').value = draft.date;
+  if(focused){
+    const again = el.querySelector('#' + focused.id);
+    if(again){
+      // an edit you hadn't committed yet (no blur) survives the rebuild too
+      if(focused.id !== 'nb' && focused.value !== undefined) again.value = focused.value;
+      again.focus();
+      try{ again.setSelectionRange(focused.start, focused.end); }catch(e){}
+    }
+  }
 }
 
 /* ---------- mutations ---------- */
